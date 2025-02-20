@@ -1,0 +1,234 @@
+---
+title: "ML HW2"
+author: "Gavin Brumfield"
+date: "2024-11-12"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+ins_t = read.csv("insurance_t.csv")
+```
+
+Previous analysis has identified potential predictor variables related to the purchase of the
+insurance product so no initial variable selection before model building is necessary.
+• The data has missing values that need to be imputed.
+o Typically, the Bank has used median and mode imputation for continuous and
+categorical variables but are open to other techniques if they are justified in the report.
+• The Bank is interested in the value of random forest models.
+o Build a random forest model.
+§ (HINT: You CANNOT just copy and paste the code from class. In class we built a
+model to predict a continuous variable. Make sure your target variable is a
+factor for the random forest.)
+o Tune the model parameters and recommend a final random forest model.
+§ You are welcome to consider variable selection as well for building your final
+model. Describe your process for arriving at your final model.
+o Report the variable importance for each of the variables in the model.
+§ Pick one metric to rank things by – no need to report multiple metrics for each
+variable.
+o Report the area under the ROC curve as well as a plot of the ROC curve.
+§ (HINT: Use the same approaches you used back in the logistic regression class.)
+• The Bank is also interested in the value of an XGBoost model.
+o Build an XGBoost model.
+§ (HINT: You CANNOT just copy and paste the code from class. In class we built a
+model to predict a continuous variable. You will need to look up the
+documentation for the ‘objective = "binary:logistic" ‘ option.)
+§ Use the area under the ROC curve (AUC) as your evaluation metric instead of
+the default in XGBoost.
+o Tune the model parameters and recommend a final XGBoost model.
+§ You are welcome to consider variable selection as well for building your final
+model. Describe your process for arriving at your final model.
+o Report the variable importance for each of the variables in the model.
+o Report the area under the ROC curve as well as a plot of the ROC curve.
+§ (HINT: Use the same approaches you used back in the logistic regression class.)
+
+
+```{r Missing Variables imputation}
+# str(ins_t)
+# summary(ins_t)
+
+
+# turn the nominal variables into factors
+library(dplyr)
+data = ins_t %>%
+  mutate(BRANCH = as.factor(BRANCH)) %>%
+  mutate_at(
+    vars(DDA, DIRDEP, SAV, ATM, CD, IRA, INV, MM, CC, SDB, 
+        INAREA, INS), 
+    ~ factor(., ordered = TRUE))
+
+## ccpurc mmcred nsf
+# NSF, MMCRED, CCPURC
+# ^ numeric with less than 10 unique values
+
+
+# Function to calculate the mode
+get_mode <- function(v) {
+  uniqv <- unique(v)
+  uniqv[which.max(tabulate(match(v, uniqv)))]
+}
+
+# For loop to iterate over each column and impute missing values
+for (col in names(data)) {
+  if (any(is.na(data[[col]]))) {  # Check if the column has missing values
+    if (is.numeric(data[[col]])) {  # Continuous variable
+      # Impute missing values with the median
+      data[[col]][is.na(data[[col]])] <- median(data[[col]], na.rm = TRUE)
+    } else if (is.factor(data[[col]]) || is.character(data[[col]])) {  # Categorical variable
+      # Impute missing values with the mode
+      data[[col]][is.na(data[[col]])] <- get_mode(data[[col]])
+    }
+  }
+}
+
+#print(data)
+#summary(data)
+```
+
+ The Bank is interested in the value of random forest models.
+o Build a random forest model.
+§ (HINT: You CANNOT just copy and paste the code from class. In class we built a
+model to predict a continuous variable. Make sure your target variable is a
+factor for the random forest.)
+
+```{r Random Forest Model - initial}
+library(randomForest)
+
+training.df <- as.data.frame(data) %>% relocate(INS) 
+
+set.seed(12345)
+rf.bank <- randomForest(INS ~ ., data = training.df, ntree = 500, importance = TRUE)
+
+
+plot(rf.bank, main = "Number of Trees Compared to MSE")
+print(rf.bank)
+```
+
+o Tune the model parameters and recommend a final random forest model.
+
+```{r Tuning a random forest}
+set.seed(12345)
+tuneRF(x = training.df[,-1], y = training.df[,1], 
+       plot = TRUE, ntreeTry = 500, stepFactor = 0.5)
+# based on output above, mtry=6 is optimal value 
+# we are using the tuneRF function to use the out-of-bag samples to tune the mtry variables
+# these out of bag samples serve as cross validations for each of the trees in the random forest
+
+# build a model with mtry = 6 as optimal value 
+# and only 100 trees
+set.seed(12345)
+rf.bank2 <- randomForest(INS ~ ., data = training.df, ntree = 100, mtry = 6, importance = TRUE)
+
+plot(rf.bank2, main = "Number of Trees Compared to MSE")
+```
+
+
+```{r Variable Importance - RF}
+varImpPlot(rf.bank2,
+           sort = TRUE,
+           n.var = 14,
+           main = "Order of Variables")
+
+importance(rf.bank2, type = 1)
+
+imp1 = data.frame(importance(rf.bank2, type = 1)) %>%
+  arrange(desc(MeanDecreaseAccuracy))
+imp1
+
+library(openxlsx)
+write.xlsx(imp1, "RF_var_importance.xlsx")
+```
+
+
+```{r ROC curves - Random Forest}
+p_hat_rf <- predict(rf.bank2, type = 'prob')
+logit_roc <- rocit(as.numeric(p_hat_rf[,2]), training.df1$INS)
+plot(logit_roc)
+plot(logit_roc)$optimal
+
+summary(logit_roc)
+```
+
+
+
+# XGBOOST
+The Bank is also interested in the value of an XGBoost model.
+o Build an XGBoost model.
+§ (HINT: You CANNOT just copy and paste the code from class. In class we built a
+model to predict a continuous variable. You will need to look up the
+documentation for the ‘objective = "binary:logistic" ‘ option.)
+§ Use the area under the ROC curve (AUC) as your evaluation metric instead of
+the default in XGBoost.
+
+```{r}
+training = data %>% relocate(INS)
+train_x <- model.matrix(INS ~ ., data = training)[, -1]
+train_y <- training$INS
+
+library(xgboost)
+
+set.seed(12345)
+xgb.bank <- xgboost(list(objective = "binary:logistic"), data = train_x, label = train_y, subsample = 0.5, nrounds = 50)
+
+xgbcv.bank <- xgb.cv(data = train_x, label = train_y, subsample = 0.5, nrounds = 50, nfold = 10)
+```
+# line 10 has smallest test rmse
+[10]	train-rmse:0.379758+0.001698	test-rmse:0.421749+0.007160 
+
+```{r Tune XGBoost}
+library(caret) 
+
+tune_grid <- expand.grid(
+  nrounds = 10,
+  eta = c(0.1, 0.15, 0.2, 0.25, 0.3),
+  max_depth = c(1:10),
+  gamma = c(0),
+  colsample_bytree = 1,
+  min_child_weight = 1,
+  subsample = c(0.25, 0.5, 0.75, 1)
+)
+
+# change name
+set.seed(12345)
+xgb.bank.caret <- train(x = train_x, y = train_y,
+      method = "xgbTree",
+      tuneGrid = tune_grid,
+      trControl = trainControl(method = 'cv', # Using 10-fold cross-validation
+                               number = 10))
+
+plot(xgb.bank.caret)
+
+xgb.bank.caret$bestTune
+```
+
+
+```{r ROC Curves - XGBoost}
+p_hat_xgb <- predict(xgb.bank.caret, type = 'prob')
+logit_roc2 <- rocit(as.numeric(p_hat_xgb[,2]), training.df9$INS)
+plot(logit_roc2)
+plot(logit_roc2)$optimal
+
+summary(logit_roc2)
+```
+
+```{r var importance}
+xgb.bank <- xgboost(data = train_x, label = train_y, subsample = .75, nrounds = 10, eta = 0.3, max_depth = 5)
+xgb.importance(feature_names = colnames(train_x), model = xgb.bank)
+
+library(Ckmeans.1d.dp)
+xgb.ggplot.importance(xgb.importance(feature_names = colnames(train_x), model = xgb.bank))
+
+imp2 = data.frame(xgb.importance(feature_names = colnames(train_x), model = xgb.bank)) %>%
+  arrange(desc(Gain))
+imp2
+
+
+library(openxlsx)
+write.xlsx(imp2, "xgboost_var_importance.xlsx")
+
+```
+
